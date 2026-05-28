@@ -3,9 +3,10 @@
 `composite()` — runs `ChromaKeyer.key_final()` on a captured JPEG against the
 chosen background. Returns a PIL Image (RGB).
 
-`make_strip()` — assembles 3 composites into a vertical photo-booth strip with
-a header band ("{header_text} · YYYY-MM-DD") above. Output is digital-only
-(~1200 px wide); not designed for print.
+`make_strip()` — assembles 3 composites into a vertical photo-booth strip. The
+title runs rotated down the left spine (so a long title gets the strip's full
+height to breathe) and the date sits in a band across the top. Output is
+digital-only (~1200 px wide); not designed for print.
 """
 
 from __future__ import annotations
@@ -22,10 +23,16 @@ from PIL import Image, ImageDraw, ImageFont
 from .chroma import ChromaKeyer
 
 STRIP_W = 1200
-STRIP_MARGIN = 40
-STRIP_GAP = 30
-STRIP_HEADER_H = 200
+STRIP_MARGIN = 40    # text padding inside the dark bands
+STRIP_BORDER = 10    # white border around the photos
+STRIP_GAP = 8        # white gap between photos
+STRIP_DATE_H = 150   # top band, holds the date
+STRIP_TITLE_W = 170  # left spine, holds the rotated title
 PHOTO_ASPECT = 3 / 2
+
+# Band colours.
+BAND_FILL = (15, 15, 25)
+BAND_TEXT = (245, 245, 230)
 
 # Font candidates — first one that loads wins. Bundle one in assets/fonts/
 # during M7; for now, fall back to system fonts.
@@ -56,44 +63,87 @@ def make_strip(composites: Iterable[Image.Image], header_text: str) -> Image.Ima
     if not photos:
         raise ValueError("at least one composite required")
 
-    photo_w = STRIP_W - 2 * STRIP_MARGIN
+    content_left = STRIP_TITLE_W + STRIP_BORDER
+    photo_w = STRIP_W - content_left - STRIP_BORDER
     photo_h = int(round(photo_w / PHOTO_ASPECT))
     total_h = (
-        STRIP_MARGIN
-        + STRIP_HEADER_H
+        STRIP_DATE_H
+        + STRIP_BORDER
         + len(photos) * (photo_h + STRIP_GAP)
         - STRIP_GAP
-        + STRIP_MARGIN
+        + STRIP_BORDER
     )
 
     strip = Image.new("RGB", (STRIP_W, total_h), (255, 255, 255))
     draw = ImageDraw.Draw(strip)
 
-    # Header band — dark with bright text.
-    header_box = (0, 0, STRIP_W, STRIP_HEADER_H)
-    draw.rectangle(header_box, fill=(15, 15, 25))
-    full_header = f"{header_text} · {dt.date.today().isoformat()}"
-    _draw_header_text(draw, full_header)
+    # Dark "L" frame: title spine down the left, date band across the top.
+    draw.rectangle((0, 0, STRIP_TITLE_W, total_h), fill=BAND_FILL)
+    draw.rectangle((0, 0, STRIP_W, STRIP_DATE_H), fill=BAND_FILL)
+
+    _draw_date(draw, dt.date.today().isoformat())
+    _draw_rotated_title(strip, header_text, (0, STRIP_DATE_H, STRIP_TITLE_W, total_h))
 
     # Photos.
-    y = STRIP_HEADER_H + STRIP_MARGIN
+    y = STRIP_DATE_H + STRIP_BORDER
     for img in photos:
         scaled = _fit_photo(img, photo_w, photo_h)
-        strip.paste(scaled, (STRIP_MARGIN, y))
+        strip.paste(scaled, (content_left, y))
         y += photo_h + STRIP_GAP
 
     return strip
 
 
-def _draw_header_text(draw: ImageDraw.ImageDraw, text: str) -> None:
-    font = _load_font(110)
+def _draw_date(draw: ImageDraw.ImageDraw, text: str) -> None:
+    """Centre the date horizontally in the top band."""
+    font = _fit_font(text, STRIP_W - 2 * STRIP_MARGIN, start_size=110)
     # Pillow 10.x: textbbox returns (l, t, r, b) of the rendered text.
     bbox = draw.textbbox((0, 0), text, font=font)
     tw = bbox[2] - bbox[0]
     th = bbox[3] - bbox[1]
     x = (STRIP_W - tw) // 2 - bbox[0]
-    y = (STRIP_HEADER_H - th) // 2 - bbox[1]
-    draw.text((x, y), text, fill=(245, 245, 230), font=font)
+    y = (STRIP_DATE_H - th) // 2 - bbox[1]
+    draw.text((x, y), text, fill=BAND_TEXT, font=font)
+
+
+def _draw_rotated_title(
+    strip: Image.Image, text: str, region: tuple[int, int, int, int]
+) -> None:
+    """Render the title rotated 90° (reading bottom-to-top) down the left spine.
+
+    The title's length runs along the strip's *height*, so even a long title has
+    plenty of room; the font is shrunk only if it would overrun that length.
+    """
+    if not text.strip():
+        return
+    x0, y0, x1, y1 = region
+    region_w, region_h = x1 - x0, y1 - y0
+    avail_len = region_h - 2 * STRIP_MARGIN
+    font = _fit_font(text, avail_len, start_size=130)
+
+    # Draw horizontally onto a tight transparent layer, then rotate.
+    bbox = font.getbbox(text)
+    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    layer = Image.new("RGBA", (tw, th), (0, 0, 0, 0))
+    ImageDraw.Draw(layer).text((-bbox[0], -bbox[1]), text, fill=BAND_TEXT, font=font)
+    rotated = layer.rotate(90, expand=True)
+
+    rw, rh = rotated.size
+    px = x0 + (region_w - rw) // 2
+    py = y0 + (region_h - rh) // 2
+    strip.paste(rotated, (px, py), rotated)
+
+
+def _fit_font(text: str, max_w: int, start_size: int, min_size: int = 24) -> ImageFont.ImageFont:
+    """Largest font (from start_size down) whose rendered text fits in max_w."""
+    size = start_size
+    while size > min_size:
+        font = _load_font(size)
+        bbox = font.getbbox(text)
+        if bbox[2] - bbox[0] <= max_w:
+            return font
+        size -= 4
+    return _load_font(min_size)
 
 
 def _load_font(size: int) -> ImageFont.ImageFont:
