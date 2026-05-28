@@ -1,0 +1,18 @@
+PyQt6~=6.7
+gphoto2~=2.5
+opencv-contrib-python~=4.10
+numpy~=1.26
+Pillow~=10.4
+requests~=2.32
+PyYAML~=6.0
+python-dotenv~=1.0
+qrcode[pil]~=7.4
+
+# dev
+pytest~=8.2
+pytest-qt~=4.4
+responses~=0.25
+ruff~=0.5
+mypy~=1.10
+types-requests
+types-PyYAML

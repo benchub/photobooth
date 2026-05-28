@@ -1,0 +1,61 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+
+# Tooling caches
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Packaging / build artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
+*.egg
+pip-wheel-metadata/
+
+# Test / coverage
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.tox/
+.nox/
+
+# --- Local config & secrets (NOT config.yaml.example, which is the template) ---
+config.yaml
+runtime_overrides.yaml
+.env
+.env.*
+
+# --- Runtime output ---
+# Captured photos, composites, strips, upload queue, etc.
+output/
+*.log
+
+# User-supplied backgrounds, but keep the bundled samples + placeholder.
+backgrounds/*
+!backgrounds/sample_*.jpg
+!backgrounds/sample_*.png
+!backgrounds/.gitkeep
+
+# --- Editor / OS cruft ---
+.DS_Store
+._*
+.AppleDouble
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+
+# --- Local tool settings (machine-specific, not for sharing) ---
+.claude/settings.local.json

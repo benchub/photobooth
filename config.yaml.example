@@ -1,0 +1,60 @@
+# Copy to config.yaml and fill in. Env vars override any value here:
+#   PHOTOBOOTH_IMMICH_BASE_URL, PHOTOBOOTH_IMMICH_API_KEY, etc.
+
+immich:
+  base_url: "https://immich.example.com"
+  api_key: ""
+  # All composites + the photo strip land in this album. Created on first
+  # upload if it doesn't exist yet. Rename per event (e.g. "Mia's Birthday").
+  album_name: "Photobooth"
+
+camera:
+  # gphoto2 config paths — discover with `gphoto2 --list-all-config` once
+  # during dev (DO NOT call from app — bricks R6 viewfinder until replug).
+  capture_target_key: "capturetarget"
+  capture_target_value: "Internal RAM"
+  image_format_key: "imageformat"
+  # R6 uses short codes (NOT "Large Fine JPEG"): L cL M cM S1 cS1 S2
+  # plus RAW combos. 'L' = Large fine JPEG. See tools/probe_choices.py to
+  # enumerate the choices on your specific body.
+  image_format_value: "L"
+  auto_poweroff_key: "autopoweroff"
+  auto_poweroff_value: "0"
+  # Max attempts to init camera (between each: kill ptpcamerad, sleep 500ms).
+  init_retries: 3
+
+chroma:
+  hue_low: 35
+  hue_high: 85
+  sat_min: 60
+  val_min: 40
+  feather_px_preview: 5
+  feather_px_final: 17
+  spill_suppress: true
+  guided_filter: true
+
+strip:
+  # Date appended automatically: "{header_text} · YYYY-MM-DD"
+  header_text: "Photobooth"
+
+ui:
+  inactivity_timeout_s: 60
+  no_frames_timeout_s: 5
+  countdown_seconds: 3
+  capture_count: 3
+  # How early to fire the shutter before the countdown finishes (ms).
+  # Compensates for the R6's capture latency so the click matches SNAP.
+  shutter_lead_ms: 220
+
+output:
+  retain_count: 200
+
+sound:
+  enabled: true
+  volume: 0.8
+
+display:
+  # Public URL shown (with QR) on the attract screen so viewers know where
+  # to find the photos. Leave empty to hide.
+  share_url: ""
+  share_caption: "See your photos at"
