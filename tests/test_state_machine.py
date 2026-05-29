@@ -6,6 +6,7 @@ Run with: QT_QPA_PLATFORM=offscreen pytest tests/test_state_machine.py
 from __future__ import annotations
 
 import os
+from unittest.mock import patch
 
 import pytest
 
@@ -55,6 +56,52 @@ def test_space_advances_through_states(app, cfg):
 
     QTest.keyClick(w, Qt.Key.Key_Space)
     assert w.state is BoothState.COUNTDOWN
+
+
+def test_startup_battery_alert_sent_once(app, cfg):
+    w = BoothWindow(cfg, enable_camera=False)
+    with patch("src.ui.booth_window.send_sms_alert") as alert:
+        w._on_battery(90, "90%")          # first reading -> one info text
+        assert alert.call_count == 1
+        assert "90%" in alert.call_args.args[1]
+        assert w._battery_banner.isHidden()  # healthy: no banner
+        w._on_battery(85, "85%")          # later readings: no repeat startup text
+        assert alert.call_count == 1
+
+
+def test_low_battery_shows_banner_and_texts_once(app, cfg):
+    cfg.camera.battery_low_threshold_pct = 25
+    w = BoothWindow(cfg, enable_camera=False)
+    w._battery_startup_alert_sent = True  # isolate the low-battery dip behavior
+
+    # isHidden() (not isVisible()) — the test window is never shown, so a
+    # child's isVisible() is always False; isHidden() tracks the show/hide call.
+    with patch("src.ui.booth_window.send_sms_alert") as alert:
+        w._on_battery(80, "80%")          # healthy: no banner, no text
+        assert w._battery_banner.isHidden()
+        alert.assert_not_called()
+
+        w._on_battery(20, "20%")          # low: banner + one text
+        assert not w._battery_banner.isHidden()
+        assert "20%" in w._battery_banner.text()
+        assert alert.call_count == 1
+
+        w._on_battery(18, "18%")          # still low: no second text (latched)
+        assert alert.call_count == 1
+
+        w._on_battery(60, "60%")          # recovered (swap): banner clears, re-arm
+        assert w._battery_banner.isHidden()
+        w._on_battery(15, "15%")          # low again -> texts again
+        assert alert.call_count == 2
+
+
+def test_unparseable_battery_does_not_alert(app, cfg):
+    w = BoothWindow(cfg, enable_camera=False)
+    w._battery_startup_alert_sent = True  # isolate from the startup info text
+    with patch("src.ui.booth_window.send_sms_alert") as alert:
+        w._on_battery(-1, "???")
+        assert w._battery_banner.isHidden()
+        alert.assert_not_called()
 
 
 def test_single_esc_does_not_quit(app, cfg):

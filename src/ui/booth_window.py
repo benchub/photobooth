@@ -15,10 +15,9 @@ from enum import Enum, auto
 from pathlib import Path
 
 import cv2
-import numpy as np
 from PyQt6.QtCore import Qt, QThread, QTimer
 from PyQt6.QtGui import QKeyEvent
-from PyQt6.QtWidgets import QMainWindow, QStackedWidget, QWidget
+from PyQt6.QtWidgets import QLabel, QMainWindow, QStackedWidget, QWidget
 
 from ..camera import CameraWorker
 from ..chroma import ChromaKeyer
@@ -26,6 +25,7 @@ from ..composite_worker import CompositeJob
 from ..compositor import composite, jpeg_bytes_to_bgr, make_strip, save_jpeg
 from ..config import Config
 from ..immich import ImmichClient
+from ..notify import send_sms_alert
 from ..upload_daemon import UploadDaemon, enqueue_session_files
 from .attract_widget import AttractWidget
 from .background_picker import BackgroundPicker
@@ -114,6 +114,21 @@ class BoothWindow(QMainWindow):
         self._settings_overlay = SettingsOverlay(cfg, self._keyer, self)
         self._settings_overlay.hide()
 
+        # Low-battery banner: a floating child of the window (like the settings
+        # overlay) so it paints over whatever state widget is showing. Shown by
+        # _on_battery when charge drops to/under the configured threshold.
+        self._battery_banner = QLabel("", self)
+        self._battery_banner.setStyleSheet(
+            "background-color: rgba(176, 32, 32, 235); color: #fff;"
+            " font-size: 30px; font-weight: bold; padding: 14px 30px;"
+            " border-radius: 12px;"
+        )
+        self._battery_banner.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._battery_banner.hide()
+        self._battery_low_latched = False  # so we text the phone once per dip
+        self._last_battery_pct = -1
+        self._battery_startup_alert_sent = False  # one info text on first reading
+
         # Adult exit: three quick Escs (Cmd+Shift+Q conflicts with macOS logout).
         self._esc_press_times: list[float] = []
         self._esc_chord_window_s = 1.5
@@ -175,6 +190,9 @@ class BoothWindow(QMainWindow):
         self._camera_worker.captured.connect(
             self._on_captured, Qt.ConnectionType.QueuedConnection,
         )
+        self._camera_worker.battery.connect(
+            self._on_battery, Qt.ConnectionType.QueuedConnection,
+        )
         self._camera_thread.start()
 
     def _on_camera_connected(self) -> None:
@@ -194,6 +212,55 @@ class BoothWindow(QMainWindow):
         # If we were mid-session, bail.
         if self._state in (BoothState.COUNTDOWN, BoothState.CAPTURE):
             self._abort_session(f"Camera disconnected: {reason}")
+
+    def _on_battery(self, percent: int, raw: str) -> None:
+        """Camera battery reading from CameraWorker. Shows/hides the on-screen
+        banner and texts the phone once when charge dips to the threshold."""
+        self._last_battery_pct = percent
+        # On the first reading after launch, text the current level (if alerts
+        # are configured — send_sms_alert no-ops otherwise) so you get a "booth
+        # is up, battery is X" confirmation without watching the screen.
+        if not self._battery_startup_alert_sent:
+            self._battery_startup_alert_sent = True
+            level = f"{percent}%" if percent >= 0 else repr(raw)
+            sent = send_sms_alert(
+                self.cfg.alerts, f"Photobooth started. Camera battery: {level}."
+            )
+            LOG.info(
+                "startup battery alert: level=%s, sms %s",
+                level, "dispatched" if sent else "skipped (alerts not configured)",
+            )
+        if percent < 0:
+            return  # couldn't parse a number — don't alert on an unknown value
+        threshold = self.cfg.camera.battery_low_threshold_pct
+        if percent <= threshold:
+            self._battery_banner.setText(
+                f"⚠  Camera battery low: {percent}% — swap the battery soon"
+            )
+            self._battery_banner.show()
+            self._position_battery_banner()
+            if not self._battery_low_latched:
+                self._battery_low_latched = True
+                send_sms_alert(
+                    self.cfg.alerts,
+                    f"Photobooth: camera battery low ({percent}%). Swap the battery soon.",
+                )
+        elif percent >= threshold + 10:
+            # Hysteresis: only clear once clearly recovered (e.g. after a swap),
+            # so a reading hovering at the threshold doesn't flicker the banner.
+            self._battery_banner.hide()
+            self._battery_low_latched = False
+
+    def _position_battery_banner(self) -> None:
+        b = self._battery_banner
+        b.adjustSize()
+        b.move(max(0, (self.width() - b.width()) // 2), 24)
+        b.raise_()
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        if self._battery_banner.isVisible():
+            self._position_battery_banner()
 
     def _abort_session(self, message: str) -> None:
         """Mid-capture failure — surface the reason and reset."""

@@ -14,8 +14,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt6.QtWidgets import QApplication
 
-from src.camera import CameraWorker, check_conflicting_processes
-from src.config import CameraConfig
+from src.camera import CameraWorker, check_conflicting_processes, parse_battery_percent
+from src.config import AlertsConfig, CameraConfig
+from src.notify import send_sms_alert
 
 
 @pytest.fixture
@@ -60,3 +61,38 @@ def test_worker_blocks_on_conflicting_process(app):
 
     assert received
     assert "EOS Utility" in received[0]
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("75%", 75),
+        ("100%", 100),
+        ("0%", 0),
+        ("5 %", 5),
+        ("250%", 100),   # clamped
+        ("Low", 15),
+        ("Normal", 75),
+        ("Empty", 0),
+        ("Full", 100),
+        ("unknown", None),
+        ("", None),
+    ],
+)
+def test_parse_battery_percent(raw, expected):
+    assert parse_battery_percent(raw) == expected
+
+
+def test_send_sms_alert_noop_when_unconfigured():
+    # No recipient / SMTP host configured → returns False and never sends.
+    assert send_sms_alert(AlertsConfig(), "hi") is False
+    assert send_sms_alert(AlertsConfig(sms_to="x@tmomail.net"), "hi") is False
+
+
+def test_send_sms_alert_dispatches_when_configured():
+    """When configured, it hands off to a background thread (no real SMTP)."""
+    cfg = AlertsConfig(sms_to="5551234567@tmomail.net", smtp_host="smtp.test")
+    with patch("src.notify.threading.Thread") as thread:
+        assert send_sms_alert(cfg, "battery low") is True
+    thread.assert_called_once()
+    thread.return_value.start.assert_called_once()

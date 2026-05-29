@@ -22,6 +22,12 @@ camera:
   auto_poweroff_value: "0"
   # Max attempts to init camera (between each: kill ptpcamerad, sleep 500ms).
   init_retries: 3
+  # Battery monitoring (read over USB from gphoto2's `batterylevel`).
+  battery_key: "batterylevel"
+  # Seconds between battery reads during live preview. 0 disables monitoring.
+  battery_poll_interval_s: 60
+  # At/under this %, show the on-screen banner and text the phone (see alerts).
+  battery_low_threshold_pct: 25
 
 chroma:
   hue_low: 35
@@ -60,3 +66,17 @@ display:
   share_caption: "See your photos at"
   # Seconds each strip stays on the attract carousel before sliding to the next.
   carousel_seconds: 5.0
+
+alerts:
+  # Phone text for low-battery (and future) alerts, via a carrier email-to-SMS
+  # gateway. T-Mobile delivers email sent to <10-digit-number>@tmomail.net as
+  # an SMS. Leave sms_to or smtp_host empty to disable phone alerts.
+  sms_to: ""                    # e.g. "5551234567@tmomail.net"
+  smtp_host: ""                 # e.g. "smtp.gmail.com"
+  smtp_port: 587
+  smtp_user: ""                 # SMTP login; also the default From address
+  # Do NOT put the password here — set it in the environment / .env:
+  #   PHOTOBOOTH_ALERTS_SMTP_PASSWORD=your-app-password
+  smtp_password: ""
+  smtp_from: ""                 # defaults to smtp_user when empty
+  smtp_starttls: true

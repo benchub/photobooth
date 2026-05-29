@@ -20,8 +20,10 @@ the exact config-key names if the defaults don't apply to your firmware.
 from __future__ import annotations
 
 import logging
+import re
 import subprocess
 import time
+from collections.abc import Callable
 from typing import Any
 
 import cv2
@@ -76,6 +78,21 @@ def kill_ptpcamerad() -> None:
     )
 
 
+# Words some bodies report for `batterylevel` instead of a percentage.
+_BATTERY_WORD_LEVELS = {"empty": 0, "low": 15, "half": 50, "normal": 75, "full": 100}
+
+
+def parse_battery_percent(raw: str) -> int | None:
+    """Map a gphoto2 batterylevel value to 0-100, or None if unrecognized.
+
+    Canon bodies report '75%'; some others report a word like 'Low'.
+    """
+    m = re.search(r"(\d+)\s*%?", raw)
+    if m:
+        return max(0, min(100, int(m.group(1))))
+    return _BATTERY_WORD_LEVELS.get(raw.strip().lower())
+
+
 def detect_camera() -> str | None:
     """Return the first detected camera's model name, or None.
 
@@ -94,16 +111,25 @@ def detect_camera() -> str | None:
     return name
 
 
-def detect_camera_with_kill_loop(timeout_s: float = 6.0) -> str | None:
+def detect_camera_with_kill_loop(
+    timeout_s: float = 6.0,
+    should_abort: Callable[[], bool] | None = None,
+) -> str | None:
     """Hammer ptpcamerad in a tight loop while polling autodetect.
 
     macOS's ptpcamerad daemon claims the USB device aggressively and respawns
     in under 500ms after `killall`. A single kill + sleep loses the race
     most of the time; a tight loop wins almost always.
+
+    `should_abort`, if given, is polled each iteration so a shutdown request
+    can break out of the loop promptly instead of blocking for `timeout_s`
+    (otherwise quitting mid-connect strands the worker thread — see stop()).
     """
     import time as _t
     deadline = _t.monotonic() + timeout_s
     while _t.monotonic() < deadline:
+        if should_abort is not None and should_abort():
+            return None
         kill_ptpcamerad()
         name = detect_camera()
         if name:
@@ -117,6 +143,7 @@ class CameraWorker(QObject):
     captured = pyqtSignal(bytes, str)     # JPEG bytes, suggested filename
     connected = pyqtSignal()
     disconnected = pyqtSignal(str)        # reason
+    battery = pyqtSignal(int, str)        # percent (-1 if unknown), raw value
 
     _capture_requested = pyqtSignal()     # internal — fires capture in this thread
     _stop_signal = pyqtSignal()           # internal — clean up inside worker thread
@@ -128,6 +155,10 @@ class CameraWorker(QObject):
         self._alive = False           # camera is connected and ready
         self._preview_streaming = False  # preview loop is iterating
         self._busy_capturing = False
+        # Set by stop() (from the GUI thread) so the blocking connect/init
+        # loops in start() can bail out promptly on shutdown. A plain bool is
+        # safe to flip across threads under the GIL.
+        self._stop_requested = False
         # Backpressure: only one preview frame may be "in flight" to the GUI
         # at a time. We keep grabbing from the camera (so Servo AF stays
         # alive) but drop frames we'd otherwise emit until the consumer acks
@@ -135,6 +166,9 @@ class CameraWorker(QObject):
         # can't keep up lets the queued-connection backlog grow without bound
         # and preview latency climbs the longer the booth runs.
         self._consumer_ready = True
+        # Battery polling cadence (monotonic seconds). 0.0 → poll on the first
+        # preview tick after connect, then every battery_poll_interval_s.
+        self._last_battery_poll = 0.0
         self._capture_requested.connect(self._on_capture_request)
         self._stop_signal.connect(self._cleanup_in_worker_thread)
 
@@ -156,8 +190,14 @@ class CameraWorker(QObject):
             return
 
         # Autodetect with a tight ptpcamerad-kill loop. A single kill
-        # loses the race against launchd respawn ~50% of the time.
-        detected = detect_camera_with_kill_loop(timeout_s=6.0)
+        # loses the race against launchd respawn ~50% of the time. Pass the
+        # stop flag so quitting mid-connect breaks out fast (else the worker
+        # thread is stranded here and gets killed mid-run → crash on exit).
+        detected = detect_camera_with_kill_loop(
+            timeout_s=6.0, should_abort=lambda: self._stop_requested
+        )
+        if self._stop_requested:
+            return  # shutting down — let the queued _stop_signal clean up
         if detected is None:
             self.disconnected.emit(
                 "No camera detected. Connect the R6 (USB-C, Wi-Fi off, "
@@ -171,6 +211,8 @@ class CameraWorker(QObject):
         except Exception as e:  # gp.GPhoto2Error subclasses Exception
             self.disconnected.emit(f"Camera init failed: {e}")
             return
+        if self._stop_requested:
+            return  # aborted during init — don't start the preview loop
 
         try:
             self._apply_startup_config()
@@ -179,6 +221,7 @@ class CameraWorker(QObject):
 
         self._alive = True
         self._preview_streaming = True
+        self._last_battery_poll = 0.0  # force a battery reading on the first tick
         self.connected.emit()
         QTimer.singleShot(0, self._grab_one_preview)
 
@@ -188,6 +231,8 @@ class CameraWorker(QObject):
         last_err: Exception | None = None
         attempts = max(1, self.cfg.init_retries * 4)  # roughly same total time
         for attempt in range(attempts):
+            if self._stop_requested:
+                return  # shutdown requested mid-init; start() bails after this
             kill_ptpcamerad()
             try:
                 self._camera = gp.Camera()
@@ -224,6 +269,9 @@ class CameraWorker(QObject):
     def _grab_one_preview(self) -> None:
         if not self._alive or self._camera is None:
             return  # only stops on shutdown — see _cleanup_in_worker_thread
+        # Cheap, infrequent battery read (skips itself between intervals and
+        # while capturing). Runs in this worker thread so it owns the camera.
+        self._maybe_poll_battery()
         if (not self._preview_streaming) or self._busy_capturing:
             # Paused or busy: idle without touching the camera, poll back.
             QTimer.singleShot(80, self._grab_one_preview)
@@ -248,6 +296,31 @@ class CameraWorker(QObject):
                 self._consumer_ready = False
                 self.frame.emit(frame)
         QTimer.singleShot(0, self._grab_one_preview)
+
+    def _maybe_poll_battery(self) -> None:
+        """Read `batterylevel` at most every battery_poll_interval_s and emit
+        the `battery` signal. Failures are swallowed — a battery read that
+        errors must not disconnect the camera; a real disconnect surfaces via
+        capture_preview() instead."""
+        interval = self.cfg.battery_poll_interval_s
+        if interval <= 0 or self._busy_capturing or self._camera is None:
+            return
+        now = time.monotonic()
+        if now - self._last_battery_poll < interval:
+            return
+        self._last_battery_poll = now
+        try:
+            config = self._camera.get_config()
+            widget = config.get_child_by_name(self.cfg.battery_key)
+            raw = str(widget.get_value())
+        except Exception as e:
+            # Visible (not debug): if the read keeps failing, that's why no
+            # battery alert ever fires — the operator needs to see it.
+            LOG.warning("battery read (%s) failed: %s", self.cfg.battery_key, e)
+            return
+        pct = parse_battery_percent(raw)
+        LOG.info("camera battery: %s (%s%%)", raw, pct if pct is not None else "?")
+        self.battery.emit(pct if pct is not None else -1, raw)
 
     @pyqtSlot()
     def mark_frame_consumed(self) -> None:
@@ -322,9 +395,16 @@ class CameraWorker(QObject):
         self.disconnected.emit(reason)
 
     def stop(self) -> None:
-        """Thread-safe — only fires a signal. Actual camera cleanup happens
-        in the worker thread; calling camera.exit() from the GUI thread
-        while the worker is mid-capture_preview crashes libgphoto2."""
+        """Thread-safe — set the abort flag, then fire the cleanup signal.
+
+        The flag lets a still-running start() (blocked in the connect/init
+        kill-loops) bail out promptly so the queued _stop_signal can be
+        processed and the thread can quit; without it, quitting mid-connect
+        strands the worker and the QThread is destroyed while running (crash).
+        Actual camera cleanup happens in the worker thread — calling
+        camera.exit() from the GUI thread mid-capture_preview crashes libgphoto2.
+        """
+        self._stop_requested = True
         self._stop_signal.emit()
 
     @pyqtSlot()

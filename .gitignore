@@ -3,10 +3,12 @@ __pycache__/
 *.py[cod]
 *$py.class
 .venv/
+.venv-upscale/
 venv/
 env/
 
 # Tooling caches
+tools/.cache/
 .mypy_cache/
 .pytest_cache/
 .ruff_cache/
@@ -37,12 +39,6 @@ runtime_overrides.yaml
 # Captured photos, composites, strips, upload queue, etc.
 output/
 *.log
-
-# User-supplied backgrounds, but keep the bundled samples + placeholder.
-backgrounds/*
-!backgrounds/sample_*.jpg
-!backgrounds/sample_*.png
-!backgrounds/.gitkeep
 
 # --- Editor / OS cruft ---
 .DS_Store

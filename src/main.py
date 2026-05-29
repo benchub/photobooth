@@ -8,6 +8,8 @@ during a session.
 from __future__ import annotations
 
 import atexit
+import logging
+import os
 import subprocess
 import sys
 
@@ -44,7 +46,7 @@ def main() -> int:
         print(f"Config error: {e}", file=sys.stderr)
         return 2
 
-    _start_caffeinate()
+    caffeinate = _start_caffeinate()
 
     # Trim output dirs so a long-running booth doesn't fill the disk.
     keep = cfg.output.retain_count
@@ -57,7 +59,24 @@ def main() -> int:
     window = BoothWindow(cfg)
     window.showFullScreen()
 
-    return app.exec()
+    rc = app.exec()
+
+    # Hard-exit once the event loop returns. The camera runs in a QThread that
+    # blocks in uninterruptible libgphoto2 calls (init/capture/get_config); if
+    # the user quits while one is in flight, closeEvent can't join the thread,
+    # and letting Python tear down a still-running QThread raises
+    # "QThread: Destroyed while thread is still running" → SIGABRT (the crash
+    # popup). closeEvent already made a best-effort graceful stop; here we just
+    # flush, drop caffeinate, and exit without running destructors so a stuck
+    # gphoto2 call can't crash us on the way out. The OS reaps the thread/USB.
+    logging.shutdown()
+    sys.stderr.flush()
+    if caffeinate is not None:
+        try:
+            caffeinate.terminate()
+        except Exception:
+            pass
+    os._exit(rc)
 
 
 if __name__ == "__main__":

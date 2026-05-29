@@ -1,0 +1,13 @@
+# Dependencies for tools/upscale.py (Real-ESRGAN background upscaler).
+# Intentionally SEPARATE from the booth's runtime requirements.txt — torch is
+# large (~2-3GB) and only needed for one-off background prep, not at runtime.
+#
+#   python -m venv .venv-upscale
+#   .venv-upscale/bin/pip install -r tools/requirements-upscale.txt
+#   .venv-upscale/bin/python tools/upscale.py my_art.png
+
+torch~=2.12
+spandrel~=0.4
+numpy~=1.26
+Pillow~=10.4
+packaging  # transitive (safetensors needs it); pin-free is fine

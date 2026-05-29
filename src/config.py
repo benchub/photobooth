@@ -34,6 +34,13 @@ class CameraConfig:
     auto_poweroff_key: str = "autopoweroff"
     auto_poweroff_value: str = "0"
     init_retries: int = 3
+    # Battery monitoring (read over USB from gphoto2's `batterylevel`).
+    battery_key: str = "batterylevel"
+    # How often to read the battery during the live-preview loop, in seconds.
+    # Set to 0 to disable battery polling entirely.
+    battery_poll_interval_s: float = 60.0
+    # Alert (on-screen banner + phone SMS) once charge is at/under this %.
+    battery_low_threshold_pct: int = 25
 
 
 @dataclass
@@ -90,6 +97,29 @@ class DisplayConfig:
 
 
 @dataclass
+class AlertsConfig:
+    """Out-of-band alerts texted to a phone via a carrier email-to-SMS gateway.
+
+    Most US carriers deliver email sent to a per-number gateway address as an
+    SMS. T-Mobile's is `<10-digit-number>@tmomail.net` (e.g. 5551234567@tmomail.net).
+    Set `sms_to` to that address and point the SMTP fields at any relay you can
+    send mail through (a Gmail account with an app password works well). Leave
+    `sms_to` or `smtp_host` empty to disable phone alerts.
+
+    Put the password in the environment, not this file:
+    PHOTOBOOTH_ALERTS_SMTP_PASSWORD=...  (or in .env)
+    """
+
+    sms_to: str = ""           # carrier gateway address, e.g. 5551234567@tmomail.net
+    smtp_host: str = ""        # e.g. smtp.gmail.com
+    smtp_port: int = 587
+    smtp_user: str = ""        # SMTP login (also the default From address)
+    smtp_password: str = ""    # set via PHOTOBOOTH_ALERTS_SMTP_PASSWORD / .env
+    smtp_from: str = ""        # defaults to smtp_user when empty
+    smtp_starttls: bool = True
+
+
+@dataclass
 class Config:
     immich: ImmichConfig = field(default_factory=ImmichConfig)
     camera: CameraConfig = field(default_factory=CameraConfig)
@@ -99,6 +129,7 @@ class Config:
     output: OutputConfig = field(default_factory=OutputConfig)
     sound: SoundConfig = field(default_factory=SoundConfig)
     display: DisplayConfig = field(default_factory=DisplayConfig)
+    alerts: AlertsConfig = field(default_factory=AlertsConfig)
 
     @property
     def backgrounds_dir(self) -> Path:
@@ -237,6 +268,8 @@ def _validate(cfg: Config) -> None:
         raise ConfigError("display.carousel_seconds must be > 0")
     if not (0 <= cfg.chroma.hue_low < cfg.chroma.hue_high <= 179):
         raise ConfigError("chroma hue range must satisfy 0 <= hue_low < hue_high <= 179")
+    if not (0 <= cfg.camera.battery_low_threshold_pct <= 100):
+        raise ConfigError("camera.battery_low_threshold_pct must be between 0 and 100")
 
 
 def _ensure_dirs(cfg: Config) -> None:
