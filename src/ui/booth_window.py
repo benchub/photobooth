@@ -159,10 +159,17 @@ class BoothWindow(QMainWindow):
         self._camera_worker = CameraWorker(self.cfg.camera)
         self._camera_worker.moveToThread(self._camera_thread)
         self._camera_thread.started.connect(self._camera_worker.start)
+        preview = self._widgets[BoothState.LIVE_PREVIEW]
         self._camera_worker.frame.connect(
-            self._widgets[BoothState.LIVE_PREVIEW].update_frame,
+            preview.update_frame,
             Qt.ConnectionType.QueuedConnection,
         )
+        # Consumer ack for the worker's frame backpressure (see CameraWorker).
+        if hasattr(preview, "frame_consumed"):
+            preview.frame_consumed.connect(
+                self._camera_worker.mark_frame_consumed,
+                Qt.ConnectionType.QueuedConnection,
+            )
         self._camera_worker.connected.connect(self._on_camera_connected)
         self._camera_worker.disconnected.connect(self._on_camera_disconnected)
         self._camera_worker.captured.connect(

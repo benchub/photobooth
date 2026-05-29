@@ -15,7 +15,8 @@ cropped to match the foreground frame's aspect.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 
 import cv2
 import numpy as np
@@ -32,6 +33,16 @@ class ChromaKeyer:
     spill_suppress: bool = True
     guided_filter: bool = True
 
+    # Cache of the last fitted preview background. Backgrounds are often
+    # full-res (e.g. 24MP), and `_fit_background` of one costs ~25ms — doing
+    # that every preview frame is the difference between smooth and unusably
+    # laggy. The fit result is identical frame-to-frame (same bg, same target
+    # size), so we memoise it keyed by (bg identity, target size).
+    _bg_cache_key: tuple[int, tuple[int, int], tuple[int, int]] | None = field(
+        default=None, init=False, repr=False, compare=False,
+    )
+    _bg_cache_val: Any = field(default=None, init=False, repr=False, compare=False)
+
     def key_preview(self, frame_bgr: np.ndarray, bg_bgr: np.ndarray) -> np.ndarray:
         """Fast path for live preview. Frame can be any size; downsample if big."""
         h, w = frame_bgr.shape[:2]
@@ -42,7 +53,7 @@ class ChromaKeyer:
                 (int(w * scale), 720),
                 interpolation=cv2.INTER_AREA,
             )
-        bg = _fit_background(bg_bgr, frame_bgr.shape[:2])
+        bg = self._fit_background_cached(bg_bgr, frame_bgr.shape[:2])
         mask = self._mask(frame_bgr, dilate=3)
         if self.feather_px_preview > 0:
             ksize = _odd(self.feather_px_preview * 2 + 1)
@@ -73,6 +84,21 @@ class ChromaKeyer:
 
         fg = self._spill_suppressed(frame_bgr, mask) if self.spill_suppress else frame_bgr
         return _alpha_composite(fg, bg, mask)
+
+    def _fit_background_cached(
+        self, bg_bgr: np.ndarray, target_hw: tuple[int, int]
+    ) -> np.ndarray:
+        """`_fit_background` memoised across preview frames.
+
+        Keyed by the bg array's identity + shape and the target size. The
+        caller (PreviewWidget) holds the bg array alive for the whole preview
+        session, so id() is stable and won't be recycled out from under us.
+        """
+        key = (id(bg_bgr), bg_bgr.shape[:2], target_hw)
+        if key != self._bg_cache_key:
+            self._bg_cache_val = _fit_background(bg_bgr, target_hw)
+            self._bg_cache_key = key
+        return self._bg_cache_val
 
     def _mask(self, frame_bgr: np.ndarray, dilate: int) -> np.ndarray:
         """Return a uint8 mask: 0=keep foreground, 255=replace with background."""

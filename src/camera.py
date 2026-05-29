@@ -128,6 +128,13 @@ class CameraWorker(QObject):
         self._alive = False           # camera is connected and ready
         self._preview_streaming = False  # preview loop is iterating
         self._busy_capturing = False
+        # Backpressure: only one preview frame may be "in flight" to the GUI
+        # at a time. We keep grabbing from the camera (so Servo AF stays
+        # alive) but drop frames we'd otherwise emit until the consumer acks
+        # the previous one via mark_frame_consumed(). Without this, a GUI that
+        # can't keep up lets the queued-connection backlog grow without bound
+        # and preview latency climbs the longer the booth runs.
+        self._consumer_ready = True
         self._capture_requested.connect(self._on_capture_request)
         self._stop_signal.connect(self._cleanup_in_worker_thread)
 
@@ -223,15 +230,34 @@ class CameraWorker(QObject):
             return
         try:
             cam_file = self._camera.capture_preview()
-            data = bytes(memoryview(cam_file.get_data_and_size()))
         except Exception as e:
             self._handle_disconnect(str(e))
             return
-        arr = np.frombuffer(data, dtype=np.uint8)
-        frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-        if frame is not None:
-            self.frame.emit(frame)
+        # capture_preview() above already serviced the camera / Servo AF for
+        # this tick. Only pay for the JPEG copy + decode + emit when the GUI
+        # is ready for another frame; otherwise drop it and grab again.
+        if self._consumer_ready:
+            try:
+                data = bytes(memoryview(cam_file.get_data_and_size()))
+            except Exception as e:
+                self._handle_disconnect(str(e))
+                return
+            arr = np.frombuffer(data, dtype=np.uint8)
+            frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+            if frame is not None:
+                self._consumer_ready = False
+                self.frame.emit(frame)
         QTimer.singleShot(0, self._grab_one_preview)
+
+    @pyqtSlot()
+    def mark_frame_consumed(self) -> None:
+        """Consumer ack — the GUI has finished with the last preview frame.
+
+        Connected from PreviewWidget via a queued connection, so it runs in
+        this worker thread and is safe to flip the flag from. Re-arms the
+        next emit in _grab_one_preview.
+        """
+        self._consumer_ready = True
 
     def request_capture(self) -> None:
         """Thread-safe — schedules a full-res capture in the worker thread."""

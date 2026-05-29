@@ -15,7 +15,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from PyQt6.QtCore import Qt, QTimer, pyqtSlot
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QImage, QPixmap, QResizeEvent
 from PyQt6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
@@ -25,6 +25,11 @@ from .scale import scale_px, short_side
 
 
 class PreviewWidget(QWidget):
+    # Emitted after each frame is processed (or skipped) so the camera worker
+    # knows the consumer is ready for the next one — see CameraWorker's
+    # backpressure note. Connected to worker.mark_frame_consumed in BoothWindow.
+    frame_consumed = pyqtSignal()
+
     def __init__(self, cfg: Config, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.cfg = cfg
@@ -108,26 +113,31 @@ class PreviewWidget(QWidget):
         (during countdown/review/etc.) — we just don't run the chroma key
         or paint when we're hidden.
         """
-        now = time.monotonic()
-        if self._last_frame_time is not None:
-            dt = now - self._last_frame_time
-            if dt > 0 and self.isVisible():
-                inst_fps = 1.0 / dt
-                self._fps_ema = (
-                    0.2 * inst_fps + 0.8 * self._fps_ema if self._fps_ema else inst_fps
-                )
-                self._fps_label.setText(f"{self._fps_ema:4.1f} fps")
-        self._last_frame_time = now
+        # Always ack — even on the early return below — so the worker re-arms
+        # and keeps frames flowing. Failing to ack would wedge the preview.
+        try:
+            now = time.monotonic()
+            if self._last_frame_time is not None:
+                dt = now - self._last_frame_time
+                if dt > 0 and self.isVisible():
+                    inst_fps = 1.0 / dt
+                    self._fps_ema = (
+                        0.2 * inst_fps + 0.8 * self._fps_ema if self._fps_ema else inst_fps
+                    )
+                    self._fps_label.setText(f"{self._fps_ema:4.1f} fps")
+            self._last_frame_time = now
 
-        if not self.isVisible():
-            return
+            if not self.isVisible():
+                return
 
-        keyer = self._resolve_keyer()
-        if self._bg_bgr is not None:
-            composited = keyer.key_preview(frame_bgr, self._bg_bgr)
-        else:
-            composited = frame_bgr
-        self._show_image(composited)
+            keyer = self._resolve_keyer()
+            if self._bg_bgr is not None:
+                composited = keyer.key_preview(frame_bgr, self._bg_bgr)
+            else:
+                composited = frame_bgr
+            self._show_image(composited)
+        finally:
+            self.frame_consumed.emit()
 
     def _resolve_keyer(self) -> ChromaKeyer:
         if self._resolved_keyer is not None:
