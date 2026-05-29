@@ -15,7 +15,7 @@ import random
 from pathlib import Path
 
 import qrcode
-from PyQt6.QtCore import QRectF, Qt, QTimer
+from PyQt6.QtCore import QEasingCurve, QRectF, Qt, QTimer, QVariantAnimation
 from PyQt6.QtGui import QBrush, QColor, QFont, QFontMetrics, QPainter, QPixmap
 from PyQt6.QtWidgets import QBoxLayout, QLabel, QVBoxLayout, QWidget
 
@@ -24,7 +24,7 @@ from .scale import scale_px, short_side
 
 LOG = logging.getLogger(__name__)
 
-CAROUSEL_ROTATE_MS = 5000        # how often to advance the carousel
+CAROUSEL_SLIDE_MS = 550          # duration of the slide-down transition
 STRIPS_RESCAN_MS = 15000         # rescan output/strips/ for new files
 
 FRAME_COLOR = QColor(245, 232, 200)   # cream
@@ -48,8 +48,52 @@ class _FramedImage(QWidget):
         self._placeholder = ""
         self._bg = SCREEN_BG
 
+        # Slide-transition state. When _progress < 1.0 the widget is mid-shuffle:
+        # _outgoing slides down off the bottom while _incoming slides down into
+        # place from the top. At rest (_progress == 1.0) we just draw _pixmap.
+        self._progress = 1.0
+        self._incoming: QPixmap | None = None
+        self._outgoing: QPixmap | None = None
+        self._anim = QVariantAnimation(self)
+        self._anim.setStartValue(0.0)
+        self._anim.setEndValue(1.0)
+        self._anim.setDuration(CAROUSEL_SLIDE_MS)
+        self._anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
+        self._anim.valueChanged.connect(self._on_anim_value)
+        self._anim.finished.connect(self._on_anim_finished)
+
     def set_pixmap(self, pix: QPixmap | None) -> None:
+        """Swap the displayed strip immediately (no animation)."""
+        self._anim.stop()
+        self._incoming = None
+        self._outgoing = None
+        self._progress = 1.0
         self._pixmap = pix if (pix is not None and not pix.isNull()) else None
+        self.update()
+
+    def animate_to(self, pix: QPixmap | None) -> None:
+        """Shuffle to `pix`: it slides in from the top while the current strip
+        slides off the bottom. Falls back to an instant swap when there's
+        nothing to slide from (first strip / placeholder) or while off-screen."""
+        pix = pix if (pix is not None and not pix.isNull()) else None
+        if pix is None or self._pixmap is None or not self.isVisible():
+            self.set_pixmap(pix)
+            return
+        self._anim.stop()
+        self._outgoing = self._pixmap
+        self._incoming = pix
+        self._pixmap = pix          # the settled image once the slide completes
+        self._progress = 0.0
+        self._anim.start()
+
+    def _on_anim_value(self, value: object) -> None:
+        self._progress = float(value)  # type: ignore[arg-type]
+        self.update()
+
+    def _on_anim_finished(self) -> None:
+        self._incoming = None
+        self._outgoing = None
+        self._progress = 1.0
         self.update()
 
     def set_placeholder(self, text: str) -> None:
@@ -61,17 +105,31 @@ class _FramedImage(QWidget):
         p.setRenderHints(
             QPainter.RenderHint.Antialiasing | QPainter.RenderHint.SmoothPixmapTransform
         )
-        w, h = self.width(), self.height()
         # Fill the whole rect with the screen colour first — a custom-paint
         # QWidget otherwise leaves unpainted areas black, which read as a
         # black box sitting on the (lighter) screen background.
         p.fillRect(self.rect(), QBrush(self._bg))
+
+        if self._progress < 1.0:
+            # Mid-shuffle: both strips travel down by the widget height, one
+            # widget-height apart, so it reads as a continuous downward scroll.
+            travel = self.height()
+            self._draw_strip(p, self._outgoing, int(self._progress * travel))
+            self._draw_strip(p, self._incoming, int((self._progress - 1.0) * travel))
+        else:
+            self._draw_strip(p, self._pixmap, 0)
+        p.end()
+
+    def _draw_strip(self, p: QPainter, pixmap: QPixmap | None, y_off: int) -> None:
+        """Paint one framed strip (or the placeholder), shifted vertically by
+        `y_off`. Frame size is driven by the image aspect, centered, then offset."""
+        w, h = self.width(), self.height()
         s = min(w, h)
         border = scale_px(8, s, minimum=2)
         radius = scale_px(6, s, minimum=2)
 
-        if self._pixmap is not None:
-            pw, ph = self._pixmap.width(), self._pixmap.height()
+        if pixmap is not None:
+            pw, ph = pixmap.width(), pixmap.height()
             aspect = pw / ph if ph else 1.0
         else:
             # Placeholder keeps the booth-strip 2:3 portrait shape.
@@ -88,7 +146,7 @@ class _FramedImage(QWidget):
             img_w = avail_w
             img_h = int(img_w / aspect)
         fx = (w - img_w) // 2
-        fy = (h - img_h) // 2
+        fy = (h - img_h) // 2 + y_off
         frame = QRectF(fx - border, fy - border,
                        img_w + 2 * border, img_h + 2 * border)
 
@@ -96,8 +154,8 @@ class _FramedImage(QWidget):
         p.setBrush(QBrush(FRAME_COLOR))
         p.drawRoundedRect(frame, radius, radius)
 
-        if self._pixmap is not None:
-            scaled = self._pixmap.scaled(
+        if pixmap is not None:
+            scaled = pixmap.scaled(
                 img_w, img_h,
                 Qt.AspectRatioMode.IgnoreAspectRatio,  # already aspect-matched
                 Qt.TransformationMode.SmoothTransformation,
@@ -113,7 +171,6 @@ class _FramedImage(QWidget):
                 p.setPen(QColor(196, 181, 154))
                 p.drawText(QRectF(fx, fy, img_w, img_h),
                            int(Qt.AlignmentFlag.AlignCenter), self._placeholder)
-        p.end()
 
 
 class AttractWidget(QWidget):
@@ -204,7 +261,7 @@ class AttractWidget(QWidget):
 
         self._carousel_timer = QTimer(self)
         self._carousel_timer.timeout.connect(self._tick_carousel)
-        self._carousel_timer.start(CAROUSEL_ROTATE_MS)
+        self._carousel_timer.start(int(cfg.display.carousel_seconds * 1000))
 
         self._rescan_timer = QTimer(self)
         self._rescan_timer.timeout.connect(self._rescan_strips)
@@ -268,9 +325,9 @@ class AttractWidget(QWidget):
             if self._carousel_queue[0] == self._carousel_index:
                 self._carousel_queue.append(self._carousel_queue.pop(0))
         self._carousel_index = self._carousel_queue.pop(0)
-        self._render_carousel()
+        self._render_carousel(animate=True)
 
-    def _render_carousel(self) -> None:
+    def _render_carousel(self, animate: bool = False) -> None:
         if not self._strips:
             self._carousel.set_pixmap(None)  # shows the placeholder
             return
@@ -281,7 +338,11 @@ class AttractWidget(QWidget):
                 return
             self._strip_pixmaps[path] = pix
         # _FramedImage handles fit-to-aspect + framing; just hand it the pixmap.
-        self._carousel.set_pixmap(self._strip_pixmaps[path])
+        # Animated swaps (carousel ticks) slide; rescans/resizes snap.
+        if animate:
+            self._carousel.animate_to(self._strip_pixmaps[path])
+        else:
+            self._carousel.set_pixmap(self._strip_pixmaps[path])
 
     # ------------------------------------------------------------------ QR
 

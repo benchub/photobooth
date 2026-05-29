@@ -84,6 +84,9 @@ class DisplayConfig:
     # screen. Leave empty to hide.
     share_url: str = ""
     share_caption: str = "See your photos at"
+    # Seconds each strip is shown on the attract carousel before it slides
+    # to the next one.
+    carousel_seconds: float = 5.0
 
 
 @dataclass
@@ -230,6 +233,8 @@ def _validate(cfg: Config) -> None:
         raise ConfigError("immich.api_key is required (set in config.yaml or PHOTOBOOTH_IMMICH_API_KEY)")
     if cfg.ui.capture_count < 1:
         raise ConfigError("ui.capture_count must be >= 1")
+    if cfg.display.carousel_seconds <= 0:
+        raise ConfigError("display.carousel_seconds must be > 0")
     if not (0 <= cfg.chroma.hue_low < cfg.chroma.hue_high <= 179):
         raise ConfigError("chroma hue range must satisfy 0 <= hue_low < hue_high <= 179")
 

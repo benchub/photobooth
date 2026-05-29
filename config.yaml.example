@@ -58,3 +58,5 @@ display:
   # to find the photos. Leave empty to hide.
   share_url: ""
   share_caption: "See your photos at"
+  # Seconds each strip stays on the attract carousel before sliding to the next.
+  carousel_seconds: 5.0
