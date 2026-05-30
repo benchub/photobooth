@@ -153,7 +153,8 @@ class CameraWorker(QObject):
         self.cfg = cfg
         self._camera: Any = None
         self._alive = False           # camera is connected and ready
-        self._preview_streaming = False  # preview loop is iterating
+        self._preview_streaming = False  # booth wants live frames right now
+        self._live_view_active = False   # EOS live view is currently powered on
         self._busy_capturing = False
         # Set by stop() (from the GUI thread) so the blocking connect/init
         # loops in start() can bail out promptly on shutdown. A plain bool is
@@ -169,6 +170,10 @@ class CameraWorker(QObject):
         # Battery polling cadence (monotonic seconds). 0.0 → poll on the first
         # preview tick after connect, then every battery_poll_interval_s.
         self._last_battery_poll = 0.0
+        # AF-drive cadence (monotonic seconds). 0.0 → drive AF on the first
+        # streaming tick, then every af_drive_interval_s. Reset on resume so the
+        # scene is refocused immediately when the live preview comes up.
+        self._last_af_drive = 0.0
         self._capture_requested.connect(self._on_capture_request)
         self._stop_signal.connect(self._cleanup_in_worker_thread)
 
@@ -220,7 +225,11 @@ class CameraWorker(QObject):
             LOG.warning("startup config partially failed: %s", e)
 
         self._alive = True
-        self._preview_streaming = True
+        # Don't power on live view yet — the booth opens in ATTRACT, and live
+        # view is the biggest battery draw. BoothWindow calls resume_preview()
+        # when it enters the live-preview/capture states. The loop still runs
+        # (idle) so battery polling keeps working while live view is off.
+        self._preview_streaming = False
         self._last_battery_poll = 0.0  # force a battery reading on the first tick
         self.connected.emit()
         QTimer.singleShot(0, self._grab_one_preview)
@@ -255,6 +264,14 @@ class CameraWorker(QObject):
             (self.cfg.capture_target_key, self.cfg.capture_target_value),
             (self.cfg.auto_poweroff_key, self.cfg.auto_poweroff_value),
         ]
+        # Only set these if configured — an unknown choice string errors, and
+        # leaving a value empty means "use whatever the body is set to".
+        if self.cfg.af_method_value:
+            keyvals.append((self.cfg.af_method_key, self.cfg.af_method_value))
+        if self.cfg.continuous_af_value:
+            keyvals.append(
+                (self.cfg.continuous_af_key, self.cfg.continuous_af_value)
+            )
         for key, value in keyvals:
             try:
                 config = self._camera.get_config()
@@ -273,17 +290,30 @@ class CameraWorker(QObject):
         # while capturing). Runs in this worker thread so it owns the camera.
         self._maybe_poll_battery()
         if (not self._preview_streaming) or self._busy_capturing:
-            # Paused or busy: idle without touching the camera, poll back.
+            # Paused or busy. If live view is still powered on from a previous
+            # streaming stretch, turn it off so the sensor stops draining the
+            # battery while the booth sits idle (ATTRACT/REVIEW/etc.).
+            if self._live_view_active and not self._busy_capturing:
+                self._set_live_view(False)
             QTimer.singleShot(80, self._grab_one_preview)
             return
+        # Resuming: re-power live view explicitly. Some bodies reject
+        # capture_preview() until the viewfinder is turned back on after we
+        # set it to 0 on the last pause.
+        if not self._live_view_active:
+            self._set_live_view(True)
         try:
             cam_file = self._camera.capture_preview()
         except Exception as e:
             self._handle_disconnect(str(e))
             return
-        # capture_preview() above already serviced the camera / Servo AF for
-        # this tick. Only pay for the JPEG copy + decode + emit when the GUI
-        # is ready for another frame; otherwise drop it and grab again.
+        self._live_view_active = True
+        # Live view doesn't drive AF on its own here, so nudge it periodically;
+        # otherwise a scene that starts out of focus never sharpens.
+        self._maybe_drive_autofocus()
+        # capture_preview() above already serviced the live view for this tick.
+        # Only pay for the JPEG copy + decode + emit when the GUI is ready for
+        # another frame; otherwise drop it and grab again.
         if self._consumer_ready:
             try:
                 data = bytes(memoryview(cam_file.get_data_and_size()))
@@ -322,6 +352,43 @@ class CameraWorker(QObject):
         LOG.info("camera battery: %s (%s%%)", raw, pct if pct is not None else "?")
         self.battery.emit(pct if pct is not None else -1, raw)
 
+    def _maybe_drive_autofocus(self) -> None:
+        """Trigger the camera's `autofocusdrive` action at most every
+        af_drive_interval_s while streaming. Live view alone doesn't refocus on
+        the R6, so without this a preview that starts blurry stays blurry. Each
+        drive briefly blocks the loop while the lens hunts — that's the cost of
+        the interval being a tradeoff. Failures are swallowed (a flaky AF read
+        must not disconnect the camera)."""
+        interval = self.cfg.af_drive_interval_s
+        if interval <= 0 or self._busy_capturing or self._camera is None:
+            return
+        now = time.monotonic()
+        if now - self._last_af_drive < interval:
+            return
+        self._last_af_drive = now
+        try:
+            widget = self._camera.get_single_config(self.cfg.autofocus_key)
+            widget.set_value(1)
+            self._camera.set_single_config(self.cfg.autofocus_key, widget)
+        except Exception as e:
+            LOG.debug("AF drive (%s) failed: %s", self.cfg.autofocus_key, e)
+
+    def _set_live_view(self, on: bool) -> None:
+        """Power the EOS live view ("viewfinder") on or off. We call this to
+        turn live view OFF when leaving the preview/capture states — it's the
+        camera's biggest battery draw. Turning it back on happens implicitly via
+        capture_preview(). Best-effort; failures are swallowed."""
+        if self._camera is None:
+            return
+        try:
+            widget = self._camera.get_single_config(self.cfg.viewfinder_key)
+            widget.set_value(1 if on else 0)
+            self._camera.set_single_config(self.cfg.viewfinder_key, widget)
+            self._live_view_active = on
+            LOG.info("live view %s", "on" if on else "off")
+        except Exception as e:
+            LOG.debug("live view toggle (%s) failed: %s", self.cfg.viewfinder_key, e)
+
     @pyqtSlot()
     def mark_frame_consumed(self) -> None:
         """Consumer ack — the GUI has finished with the last preview frame.
@@ -346,9 +413,10 @@ class CameraWorker(QObject):
             return
         self._busy_capturing = True
         try:
-            # No explicit autofocus drive — set body AF mode to Servo + use
-            # live view, and capture lands instantly with whatever focus the
-            # camera currently has. Driving AF here added ~350ms per shot.
+            # No autofocus drive on the shot itself — the live preview has been
+            # driving AF every af_drive_interval_s right up to the countdown, so
+            # focus is already fresh and the capture lands instantly. Driving AF
+            # here too would add ~350ms of shutter lag per shot.
             LOG.info("calling camera.capture(GP_CAPTURE_IMAGE)…")
             cam_path = self._camera.capture(gp.GP_CAPTURE_IMAGE)
             LOG.info("capture returned path: %s/%s", cam_path.folder, cam_path.name)
@@ -376,12 +444,14 @@ class CameraWorker(QObject):
 
     def resume_preview(self) -> None:
         """Toggle flag only. The loop in the worker thread picks it up on
-        its next poll tick (≤80ms)."""
+        its next poll tick (≤80ms), re-powering live view via capture_preview().
+        Reset the AF timer so the scene is refocused right away."""
         if not self._alive or self._camera is None:
             return
         if not self._preview_streaming:
             LOG.info("resuming preview")
         self._preview_streaming = True
+        self._last_af_drive = 0.0  # drive AF on the first streaming tick
 
     def _handle_disconnect(self, reason: str) -> None:
         self._alive = False

@@ -6,7 +6,7 @@ Run with: QT_QPA_PLATFORM=offscreen pytest tests/test_state_machine.py
 from __future__ import annotations
 
 import os
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -44,6 +44,29 @@ def test_starts_in_attract(app, cfg):
     assert w.state is BoothState.ATTRACT
 
 
+def test_live_view_only_runs_in_preview_and_capture_states(app, cfg):
+    """Battery saver: live view is resumed only for the pick/preview/countdown/
+    capture states (pick pre-warms it) and paused for every idle state."""
+    w = BoothWindow(cfg, enable_camera=False)
+    w._camera_worker = MagicMock()
+
+    live = {
+        BoothState.PICK_BACKGROUND,
+        BoothState.LIVE_PREVIEW,
+        BoothState.COUNTDOWN,
+        BoothState.CAPTURE,
+    }
+    for state in BoothState:
+        w._camera_worker.reset_mock()
+        w.transition_to(state)
+        if state in live:
+            w._camera_worker.resume_preview.assert_called()
+            w._camera_worker.pause_preview.assert_not_called()
+        else:
+            w._camera_worker.pause_preview.assert_called()
+            w._camera_worker.resume_preview.assert_not_called()
+
+
 def test_space_advances_through_states(app, cfg):
     w = BoothWindow(cfg, enable_camera=False)
     assert w.state is BoothState.ATTRACT
@@ -60,7 +83,7 @@ def test_space_advances_through_states(app, cfg):
 
 def test_startup_battery_alert_sent_once(app, cfg):
     w = BoothWindow(cfg, enable_camera=False)
-    with patch("src.ui.booth_window.send_sms_alert") as alert:
+    with patch("src.ui.booth_window.send_alert") as alert:
         w._on_battery(90, "90%")          # first reading -> one info text
         assert alert.call_count == 1
         assert "90%" in alert.call_args.args[1]
@@ -76,7 +99,7 @@ def test_low_battery_shows_banner_and_texts_once(app, cfg):
 
     # isHidden() (not isVisible()) — the test window is never shown, so a
     # child's isVisible() is always False; isHidden() tracks the show/hide call.
-    with patch("src.ui.booth_window.send_sms_alert") as alert:
+    with patch("src.ui.booth_window.send_alert") as alert:
         w._on_battery(80, "80%")          # healthy: no banner, no text
         assert w._battery_banner.isHidden()
         alert.assert_not_called()
@@ -98,7 +121,7 @@ def test_low_battery_shows_banner_and_texts_once(app, cfg):
 def test_unparseable_battery_does_not_alert(app, cfg):
     w = BoothWindow(cfg, enable_camera=False)
     w._battery_startup_alert_sent = True  # isolate from the startup info text
-    with patch("src.ui.booth_window.send_sms_alert") as alert:
+    with patch("src.ui.booth_window.send_alert") as alert:
         w._on_battery(-1, "???")
         assert w._battery_banner.isHidden()
         alert.assert_not_called()

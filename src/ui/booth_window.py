@@ -25,7 +25,7 @@ from ..composite_worker import CompositeJob
 from ..compositor import composite, jpeg_bytes_to_bgr, make_strip, save_jpeg
 from ..config import Config
 from ..immich import ImmichClient
-from ..notify import send_sms_alert
+from ..notify import send_alert
 from ..upload_daemon import UploadDaemon, enqueue_session_files
 from .attract_widget import AttractWidget
 from .background_picker import BackgroundPicker
@@ -51,6 +51,23 @@ class BoothState(Enum):
     REVIEW = auto()
     UPLOADING = auto()
     DONE = auto()
+
+
+# States that need the camera's live view powered on: the live composited
+# preview, and the countdown/capture that follow it (keeping live view up across
+# the countdown avoids a rack-focus hitch on the shot). PICK_BACKGROUND is
+# included to pre-warm live view + AF while the user picks a background, so the
+# preview is already up and focused the instant they reach it. Every other state
+# is idle as far as the camera is concerned, so we turn live view off there to
+# save battery — it's the R6's single biggest power draw.
+_LIVE_VIEW_STATES = frozenset(
+    {
+        BoothState.PICK_BACKGROUND,
+        BoothState.LIVE_PREVIEW,
+        BoothState.COUNTDOWN,
+        BoothState.CAPTURE,
+    }
+)
 
 
 class BoothWindow(QMainWindow):
@@ -202,6 +219,19 @@ class BoothWindow(QMainWindow):
         preview = self._widgets[BoothState.LIVE_PREVIEW]
         if hasattr(preview, "set_camera_status"):
             preview.set_camera_status(True, None)
+        # The worker comes up with live view paused; if we're already sitting in
+        # a state that needs it (e.g. the camera reconnected mid-session), turn
+        # it on now.
+        self._apply_preview_mode()
+
+    def _apply_preview_mode(self) -> None:
+        """Resume or pause the camera's live view to match the current state."""
+        if self._camera_worker is None:
+            return
+        if self._state in _LIVE_VIEW_STATES:
+            self._camera_worker.resume_preview()
+        else:
+            self._camera_worker.pause_preview()
 
     def _on_camera_disconnected(self, reason: str) -> None:
         LOG.warning("camera disconnected: %s", reason)
@@ -217,17 +247,17 @@ class BoothWindow(QMainWindow):
         """Camera battery reading from CameraWorker. Shows/hides the on-screen
         banner and texts the phone once when charge dips to the threshold."""
         self._last_battery_pct = percent
-        # On the first reading after launch, text the current level (if alerts
-        # are configured — send_sms_alert no-ops otherwise) so you get a "booth
+        # On the first reading after launch, alert the current level (if alerts
+        # are configured — send_alert no-ops otherwise) so you get a "booth
         # is up, battery is X" confirmation without watching the screen.
         if not self._battery_startup_alert_sent:
             self._battery_startup_alert_sent = True
             level = f"{percent}%" if percent >= 0 else repr(raw)
-            sent = send_sms_alert(
+            sent = send_alert(
                 self.cfg.alerts, f"Photobooth started. Camera battery: {level}."
             )
             LOG.info(
-                "startup battery alert: level=%s, sms %s",
+                "startup battery alert: level=%s, %s",
                 level, "dispatched" if sent else "skipped (alerts not configured)",
             )
         if percent < 0:
@@ -241,7 +271,7 @@ class BoothWindow(QMainWindow):
             self._position_battery_banner()
             if not self._battery_low_latched:
                 self._battery_low_latched = True
-                send_sms_alert(
+                send_alert(
                     self.cfg.alerts,
                     f"Photobooth: camera battery low ({percent}%). Swap the battery soon.",
                 )
@@ -290,11 +320,9 @@ class BoothWindow(QMainWindow):
         if hasattr(widget, "on_enter"):
             widget.on_enter()
         self._reset_inactivity_timer()
-        # Note: we deliberately do NOT pause the camera preview between
-        # states. The R6 needs live-view active to keep Servo AF tracking;
-        # if we pause during the countdown, the lens un-focuses and the
-        # capture has a visible "rack-focus" lag. PreviewWidget itself
-        # skips chroma-key work when not visible, so unused frames are cheap.
+        # Power live view on only for the states that need it; turn it off
+        # everywhere else so the camera isn't draining battery while idle.
+        self._apply_preview_mode()
 
     def advance(self) -> None:
         s = self._state

@@ -34,6 +34,35 @@ class CameraConfig:
     auto_poweroff_key: str = "autopoweroff"
     auto_poweroff_value: str = "0"
     init_retries: int = 3
+    # Autofocus: live view alone doesn't drive AF on the R6, so we trigger the
+    # `autofocusdrive` action periodically while showing the live preview.
+    autofocus_key: str = "autofocusdrive"
+    # Fallback AF: trigger the `autofocusdrive` action every N seconds while the
+    # live preview is up. This is for bodies where continuous AF (below) doesn't
+    # drive the lens over the USB tether. Each drive briefly hitches the preview
+    # as the lens hunts. IMPORTANT: don't run this together with continuous AF —
+    # the periodic half-press pulse fights the continuous focus and you get no
+    # refocus at all. 0 disables it (the default; rely on continuous_af instead).
+    af_drive_interval_s: float = 0.0
+    # AF area mode. `autofocusdrive` focuses using whatever area mode the body
+    # is in, so to get face/eye priority the camera must be in a face-detecting
+    # mode (e.g. Whole-area / Face+Tracking; the R6 reports this as "LiveFace"
+    # and exposes no other choice, so it's already correct — leave this empty).
+    # The choice strings vary by firmware — run `tools/probe_choices.py` to list
+    # what your body exposes. Empty = don't touch the body's mode.
+    af_method_key: str = "afmethod"
+    af_method_value: str = ""
+    # Continuous AF — the primary focus mechanism. With the AF method already
+    # face-detecting, "On" makes the camera continuously track and refocus on
+    # faces during live view (the same eye-AF the body does on its own). Set
+    # "Off" to disable, or "" to not touch the body's setting. Don't also enable
+    # af_drive_interval_s above — the two fight and you get no refocus at all.
+    continuous_af_key: str = "continuousaf"
+    continuous_af_value: str = "On"
+    # Live view ("viewfinder") is the camera's biggest battery draw, so we turn
+    # it off whenever the booth isn't in the live-preview/capture states. This
+    # is the gphoto2 config key used to toggle it.
+    viewfinder_key: str = "viewfinder"
     # Battery monitoring (read over USB from gphoto2's `batterylevel`).
     battery_key: str = "batterylevel"
     # How often to read the battery during the live-preview loop, in seconds.
@@ -98,18 +127,26 @@ class DisplayConfig:
 
 @dataclass
 class AlertsConfig:
-    """Out-of-band alerts texted to a phone via a carrier email-to-SMS gateway.
+    """Out-of-band alerts delivered to a phone. Two independent channels, each
+    enabled when configured; both fire if both are set up.
 
-    Most US carriers deliver email sent to a per-number gateway address as an
-    SMS. T-Mobile's is `<10-digit-number>@tmomail.net` (e.g. 5551234567@tmomail.net).
-    Set `sms_to` to that address and point the SMTP fields at any relay you can
-    send mail through (a Gmail account with an app password works well). Leave
-    `sms_to` or `smtp_host` empty to disable phone alerts.
+    Email-to-SMS gateway: most US carriers deliver email sent to a per-number
+    gateway address as an SMS. T-Mobile's is `<10-digit-number>@tmomail.net`
+    (e.g. 5551234567@tmomail.net). Set `sms_to` and point the SMTP fields at any
+    relay you can send mail through (a Gmail account with an app password works
+    well). Leave `sms_to` or `smtp_host` empty to disable this channel. Carrier
+    gateways are free but flaky, hence the ntfy option below.
 
-    Put the password in the environment, not this file:
-    PHOTOBOOTH_ALERTS_SMTP_PASSWORD=...  (or in .env)
+    ntfy push (https://ntfy.sh): set `ntfy_topic` to any hard-to-guess string and
+    subscribe to it in the ntfy phone app (or at https://ntfy.sh/<topic>). No
+    account needed on the public server. Point `ntfy_server` at a self-hosted
+    instance if you run one. Leave `ntfy_topic` empty to disable this channel.
+
+    Put secrets in the environment, not this file:
+    PHOTOBOOTH_ALERTS_SMTP_PASSWORD=...  PHOTOBOOTH_ALERTS_NTFY_TOKEN=...  (or .env)
     """
 
+    # Email-to-SMS gateway channel.
     sms_to: str = ""           # carrier gateway address, e.g. 5551234567@tmomail.net
     smtp_host: str = ""        # e.g. smtp.gmail.com
     smtp_port: int = 587
@@ -117,6 +154,12 @@ class AlertsConfig:
     smtp_password: str = ""    # set via PHOTOBOOTH_ALERTS_SMTP_PASSWORD / .env
     smtp_from: str = ""        # defaults to smtp_user when empty
     smtp_starttls: bool = True
+
+    # ntfy push channel.
+    ntfy_topic: str = ""              # subscribe to this topic in the ntfy app
+    ntfy_server: str = "https://ntfy.sh"
+    ntfy_token: str = ""             # optional; set via PHOTOBOOTH_ALERTS_NTFY_TOKEN / .env
+    ntfy_priority: str = ""          # optional: min|low|default|high|max
 
 
 @dataclass

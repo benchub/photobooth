@@ -108,10 +108,10 @@ class PreviewWidget(QWidget):
     def update_frame(self, frame_bgr: np.ndarray) -> None:
         """Called by CameraWorker on every preview frame.
 
-        The camera worker keeps live view active continuously so the R6's
-        Servo AF tracks focus even while we're not showing the preview
-        (during countdown/review/etc.) — we just don't run the chroma key
-        or paint when we're hidden.
+        Frames only arrive while the booth is in a live-view state (the live
+        preview and the countdown/capture that follow it); the worker powers
+        live view off otherwise to save battery. We still skip the chroma key
+        and paint when this widget isn't the visible one (e.g. countdown).
         """
         # Always ack — even on the early return below — so the worker re-arms
         # and keeps frames flowing. Failing to ack would wedge the preview.

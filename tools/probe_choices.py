@@ -1,5 +1,9 @@
-"""Enumerate the choice strings for `imageformat` (and a few related keys)
-without triggering --list-all-config (which is known to brick the R6).
+"""Enumerate the choice strings for `imageformat`, the AF area/subject-detection
+keys, and a few related keys — without triggering --list-all-config (which is
+known to brick the R6).
+
+Use the AF section to find the value that puts your body into a face-detecting
+mode, then set camera.af_method_value (and friends) in config.yaml.
 """
 
 from __future__ import annotations
@@ -66,8 +70,21 @@ def main() -> int:
         print("init failed", file=sys.stderr); return 1
 
     config = cam.get_config()
+    print("\n-- capture / format --")
     for key in ("imageformat", "imageformatsd", "imageformatcf",
                 "capturetarget", "autopoweroff"):
+        show_widget(config, key)
+
+    # AF area mode + subject/eye detection. Names vary by body/firmware; most of
+    # these won't exist — the ones that do, and their current value + choices,
+    # tell you what to put in camera.af_method_value etc. Look for a choice
+    # like "Face+Tracking" / "Whole Area" / "u-Live" to get face priority.
+    print("\n-- autofocus area / subject detection --")
+    for key in ("afmethod", "eosafmethod", "liveviewafmethod", "afarea",
+                "focusmode", "focusmode2", "continuousaf", "servoaf",
+                "eosmovieservoaf", "aimode", "eyedetection", "eyeaf",
+                "subjectdetection", "subjecttodetect", "trackingaf",
+                "wholeareaaf"):
         show_widget(config, key)
 
     cam.exit()

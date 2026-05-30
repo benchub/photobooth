@@ -22,6 +22,29 @@ camera:
   auto_poweroff_value: "0"
   # Max attempts to init camera (between each: kill ptpcamerad, sleep 500ms).
   init_retries: 3
+  # Autofocus. Continuous AF (below) is the primary mechanism. This periodic
+  # `autofocusdrive` is a FALLBACK for bodies where continuous AF doesn't drive
+  # the lens over USB — leave it 0 unless continuous AF doesn't focus for you.
+  # Never run both at once: the periodic pulse fights continuous AF and you get
+  # no refocus at all. Each drive also briefly hitches the preview.
+  autofocus_key: "autofocusdrive"
+  af_drive_interval_s: 0
+  # AF area mode. autofocusdrive focuses with whatever area mode the body is in,
+  # so for face/eye priority the camera must be in a face-detecting mode. The R6
+  # reports this as "LiveFace" with no other choice (already correct), so leave
+  # af_method_value empty. Run `tools/probe_choices.py` to see your body's modes.
+  af_method_key: "afmethod"
+  af_method_value: ""
+  # Continuous AF — the primary focus mechanism. "On" makes the camera track and
+  # refocus on faces continuously during live view (the same eye AF it does on
+  # its own). "Off" disables; "" leaves the body's setting alone. Don't also set
+  # af_drive_interval_s above — the two fight and you get no refocus at all.
+  continuous_af_key: "continuousaf"
+  continuous_af_value: "On"
+  # Live view is the camera's biggest battery draw, so the app turns it off
+  # whenever the booth isn't in the live-preview/capture states. This is the
+  # gphoto2 key it toggles.
+  viewfinder_key: "viewfinder"
   # Battery monitoring (read over USB from gphoto2's `batterylevel`).
   battery_key: "batterylevel"
   # Seconds between battery reads during live preview. 0 disables monitoring.
@@ -68,9 +91,13 @@ display:
   carousel_seconds: 5.0
 
 alerts:
-  # Phone text for low-battery (and future) alerts, via a carrier email-to-SMS
-  # gateway. T-Mobile delivers email sent to <10-digit-number>@tmomail.net as
-  # an SMS. Leave sms_to or smtp_host empty to disable phone alerts.
+  # Two independent channels for low-battery (and future) alerts; each fires when
+  # configured, and both fire if both are set. Leave a channel's key(s) empty to
+  # disable it.
+
+  # Channel 1 — email-to-SMS gateway. T-Mobile delivers email sent to
+  # <10-digit-number>@tmomail.net as an SMS. Free but flaky. Leave sms_to or
+  # smtp_host empty to disable.
   sms_to: ""                    # e.g. "5551234567@tmomail.net"
   smtp_host: ""                 # e.g. "smtp.gmail.com"
   smtp_port: 587
@@ -80,3 +107,13 @@ alerts:
   smtp_password: ""
   smtp_from: ""                 # defaults to smtp_user when empty
   smtp_starttls: true
+
+  # Channel 2 — ntfy push (https://ntfy.sh). Pick a hard-to-guess topic name and
+  # subscribe to it in the ntfy phone app (or open https://ntfy.sh/<topic>). No
+  # account needed on the public server. Leave ntfy_topic empty to disable.
+  ntfy_topic: ""                # e.g. "photobooth-3f9a2c"
+  ntfy_server: "https://ntfy.sh"   # point at your own instance if self-hosting
+  ntfy_priority: ""             # optional: min|low|default|high|max
+  # For a protected/self-hosted topic, set the token in the environment / .env:
+  #   PHOTOBOOTH_ALERTS_NTFY_TOKEN=tk_...
+  ntfy_token: ""

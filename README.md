@@ -71,6 +71,78 @@ python -m src.main # direct
 | `Return` | Confirm background selection |
 | `Esc Esc Esc` (within 1.5s) | Quit (adult chord — kid-resistant) |
 | `Esc` (single, or slow) | **Intentionally does nothing** |
+| `Cmd+,` | Toggle the on-site settings overlay (see below) |
+
+---
+
+## Configuration
+
+Settings live in `config.yaml` (copy from `config.yaml.example`). Anything in the
+file can be overridden by an environment variable named
+`PHOTOBOOTH_<SECTION>_<KEY>` — e.g. `PHOTOBOOTH_IMMICH_API_KEY`,
+`PHOTOBOOTH_SOUND_ENABLED=false`. Secrets (`smtp_password`, `ntfy_token`,
+`immich.api_key`) are best set via the environment or a `.env` file rather than
+committed to `config.yaml`.
+
+| Section | Key knobs |
+|---|---|
+| `immich` | `base_url`, `api_key`, `album_name` |
+| `camera` | capture target/format keys, `init_retries`, battery monitoring (`battery_poll_interval_s`, `battery_low_threshold_pct`) |
+| `chroma` | green-key tuning: `hue_low/high`, `sat_min`, `val_min`, `feather_px_*`, `spill_suppress`, `guided_filter` |
+| `strip` | `header_text` printed down the side of the strip |
+| `ui` | `inactivity_timeout_s`, `countdown_seconds`, `capture_count`, `shutter_lead_ms` |
+| `output` | `retain_count` — how many recent local files to keep per folder |
+| `sound` | `enabled`, `volume` |
+| `display` | `share_url` (+ `share_caption`) shown as text/QR on attract; `carousel_seconds` (strip carousel pace) |
+| `alerts` | battery/status notifications — see below |
+
+Changes made through the on-site overlay are written to `runtime_overrides.yaml`,
+which is layered on top of `config.yaml` at launch. Load order:
+defaults → `config.yaml` → `runtime_overrides.yaml` → environment.
+
+---
+
+## On-site tuning (settings overlay)
+
+Press **`Cmd+,`** to open an adult-only overlay for live chroma-key tuning
+without leaving the booth. The sliders (green hue range, saturation/value
+thresholds, feathering, spill suppression, guided filter) modify the live
+preview immediately.
+
+- **Save** writes the current values to `runtime_overrides.yaml`, so they persist
+  across the next launch.
+- **Reset** clears those overrides and reverts to whatever `config.yaml` defines.
+
+Overlay changes are session-local until you hit Save.
+
+---
+
+## Alerts (battery & status)
+
+The booth can notify a phone when the camera battery runs low (and sends a
+"booth is up, battery is X%" confirmation on startup). Configure under `alerts:`
+in `config.yaml`. Two independent channels — each fires when configured, and both
+fire if both are set:
+
+- **ntfy push** (recommended) — set `ntfy_topic` to a hard-to-guess string and
+  subscribe to it in the [ntfy](https://ntfy.sh) phone app (or open
+  `https://ntfy.sh/<topic>`). No account needed on the public server. Point
+  `ntfy_server` at your own instance if you self-host; for a protected topic set
+  `PHOTOBOOTH_ALERTS_NTFY_TOKEN` in the environment.
+- **Email-to-SMS gateway** — set `sms_to` to your carrier's gateway address
+  (T-Mobile: `<10-digit-number>@tmomail.net`) and point the `smtp_*` fields at a
+  relay you can send through (a Gmail account with an app password works). Put the
+  password in `PHOTOBOOTH_ALERTS_SMTP_PASSWORD`, not the file. Free but flaky —
+  hence the ntfy option.
+
+Battery thresholds live under `camera:` (`battery_low_threshold_pct`,
+`battery_poll_interval_s`; set the interval to `0` to disable polling).
+
+Test your setup without launching the booth:
+
+```bash
+python tools/test_alert.py   # exercises every configured channel, prints results
+```
 
 ---
 
@@ -133,8 +205,13 @@ Paste the resulting key into `config.yaml` under `immich.api_key` (or set `PHOTO
 - If a session ended with "queued for retry", files are in `output/pending_upload/`. The app drains that folder on startup; just relaunch.
 
 ### The app crashed
-- The wrapper script auto-restarts. Check `~/Library/Logs/photobooth.log` (TODO: wire up file logging in M7).
+- The wrapper script (`run.sh`) auto-restarts on a non-clean exit. Check the log at `~/.photobooth/log.txt` (also echoed to stderr).
 - If `ptpcamerad` SIGABRT'd libgphoto2, that's a known macOS issue — usually resolves with `killall -9 ptpcamerad` + replug.
+
+### Not getting battery / low-battery alerts
+- Run `python tools/test_alert.py` — it prints the resolved config and the result of a send on each configured channel.
+- ntfy: confirm the phone app is subscribed to the exact `ntfy_topic`, and that the Mac can reach `ntfy_server`.
+- Email-to-SMS: gateways are unreliable and slow; if it's flaky, prefer the ntfy channel.
 
 ---
 
@@ -156,12 +233,20 @@ photobooth/
 │   ├── composite/        # green-screened versions
 │   ├── strips/           # the photobooth strips
 │   └── pending_upload/   # retry queue if Immich was unreachable
-├── src/                  # see plan file for milestone breakdown
+├── src/                  # app code (camera, chroma, compositor, immich, notify, ui/…)
 ├── tests/
 └── tools/
-    ├── make_samples.py
-    └── make_sounds.py
+    ├── make_samples.py       # generate sample backgrounds
+    ├── make_sounds.py        # generate beep.wav / shutter.wav
+    ├── test_alert.py         # test the configured alert channels
+    ├── test_composite.py     # test green-screen compositing on a still
+    ├── probe_*.py            # one-off gphoto2 diagnostics (camera, battery, AF, …)
+    ├── upscale.py            # AI-art → 6000×4000 background upscaler (see tools/README.md)
+    └── requirements-upscale.txt
 ```
+
+The upscaler runs in its own `.venv-upscale` (a large PyTorch dependency the
+booth itself doesn't need) — see [`tools/README.md`](tools/README.md).
 
 ---
 
@@ -200,5 +285,5 @@ QT_QPA_PLATFORM=offscreen pytest
 State-machine + chroma-key + compositor + Immich (mocked) + retention +
 responsive-layout (both orientations) tests all run headless. Camera-worker
 tests cover the non-hardware paths (conflict detection, fallback when
-`gphoto2` isn't importable). Real-hardware verification is manual; see the plan
-file for the M3 checklist.
+`gphoto2` isn't importable). Real-hardware verification is manual — see the
+**Hardware checklist** above.
